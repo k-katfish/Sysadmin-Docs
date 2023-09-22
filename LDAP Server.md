@@ -10,7 +10,7 @@ This article is about how to configure an LDAP Server, and doesn't even touch on
 
 - You're using an EL server (Rocky or actual RHEL)
 - You're using the EL Port389 server (not OpenLDAP)
-- I'm going to omit sudo from these instructions, figure out where you need it yourself. (hint - sudo su)
+- I'm going to omit sudo from these instructions, you may need to include it in some places or just become root.
 
 ## Installation
 
