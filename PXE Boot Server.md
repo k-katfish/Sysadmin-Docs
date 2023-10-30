@@ -2,6 +2,10 @@
 
 As always, we're using Rocky Linux. This guide will install Rocky 8 via pxe boot, but I'm assuming you can read between the lines and install whatever other type of OS you want from here.
 
+> Side note - I think MemTest (<https://memtest.org/>) is a super handy tool to have. I've included a section in this article about Memtest. If you don't need it or want it, then just skip that part - it's not _strictly_ necessary. But super handy.
+
+I'll leave it to you as an exercise for you to figure out how to make a thing that will re-mount the iso images on boot.
+
 ## Quick summary: the end result
 
 1. You press F12 on your client to boot from the Network.
@@ -19,7 +23,7 @@ Before starting you need:
 
 1. Linux Server
 2. A Linux installer iso (like Rocky8.iso)
-3. Drive to make it happen in under 60 minutes :)
+3. Motivation to make it happen in under 60 minutes :)
 
 PXE servers on linux require a few things things: TFTP and HTTP. You will also want to have the syslinux package so that you can grab the pxelinux.0 file (read on in the PXE section). And you'll need ISO images for everything you want to boot (hint - you don't just serve the ISO, you have to mount it and serve stuff out of the iso. It's kinda like carving up a crab and serving its heart on a platter to a patron, rather than handing the patron the crab). You'll also need to configure your DHCP server (more info about that later).
 
@@ -33,6 +37,7 @@ PXE servers on linux require a few things things: TFTP and HTTP. You will also w
 | |  ` initrd.img    # comes from Rocky8.iso/isolinuz/initrd.img
 | | /pxelinux.cfg
 | |  ` default
+| | memtest.bin      # optional, from memtest.org
 | | ldlinux.c32      # Comes from /usr/bin/syslinux/ldlinux.c32
 | ` pxelinux.0       # Comes from /usr/bin/syslinux/pxelinux.0
 | 
@@ -58,7 +63,9 @@ PXE starts with TFTP. So we'll set up a directory for tftp to host a bunch of fi
 
     ```bash
     yum install -y syslinux
-    cp /usr/share/syslinux/pxelinux.0 /srv/tftp
+    cp /usr/share/syslinux/pxelinux.0  /srv/tftp   
+    cp /usr/share/syslinux/ldlinux.c32 /srv/tftp
+    cp memtest64.bin /srv/tftp  # optional
     ```
 
 3. Configure the `/srv/tftp/pxelinux.cfg/default`
@@ -81,7 +88,7 @@ PXE starts with TFTP. So we'll set up a directory for tftp to host a bunch of fi
 
     label 3
       MENU LABEL ^Memtest
-      KERNEL memtest
+      KERNEL memtest64.bin
     ```
 
     For less information about the config than you  might expect: <https://wiki.syslinux.org/wiki/index.php?title=PXELINUX>
@@ -91,12 +98,19 @@ PXE starts with TFTP. So we'll set up a directory for tftp to host a bunch of fi
     ```bash
     mkdir /var/www/html/pxeboot
     mkdir /var/www/html/pxeboot/rocky8
-    mount /root/Rocky8.iso /var/www/html/pxeboot/Rocky8
+    mount /root/Rocky8.iso /var/www/html/pxeboot/rocky8
     ```
 
 5. Copy over the `vmlinuz` and `initrd.img` to `/srv/tftp/rocky8`
 
+    ```bash
+    cp /var/www/html/pxeboot/rocky8/isolinux/vmlinuz /srv/tftp/rocky8
+    cp /var/www/html/pxeboot/rocky8/isolinux/initrd.img /srv/tftp/rocky8
+    ```
+
 ## Install the TFTP server
+
+> Note - xinetd is dead and gone (rip xinetd)
 
 1. Create a folder for the TFTP files: `mkdir /srv/tftp`
 2. Create a TFTP service user
@@ -105,28 +119,40 @@ PXE starts with TFTP. So we'll set up a directory for tftp to host a bunch of fi
     useradd -r tftp -d /srv/tftp -s /sbin/nologin
     ```
 
-3. Give the tftp user ownership of the tftp directory: `chown -R tftp /srv/tftp ; chmod -R 600 /srv/tftp`
-4. Install TFTP Server `sudo yum install tftp-server xinetd`
-5. Edit the configuration file:
+3. Give the tftp user ownership of the tftp directory: `chown -R tftp /srv/tftp ; chmod -R 755 /srv/tftp`
+4. Install TFTP Server `sudo yum install tftp-server`
+5. Edit the systemd unit file:
 
-    `/etc/xinetd.d/tftp`
+    `/usr/lib/systemd/system/tftp.service`
 
-    ```conf
-    service tftp
-    {
-        socket_type     = dgram
-        protocol        = udp
-        wait            = yes
-        user            = tftp # is root by default
-        server          = /usr/sbin/in.tftpd
-        server_args     = -s /srv/tftp
-        disable         = no # is yes by default
-        per_source      = 11
-        cps             = 100 2
-    }
+    ```ini
+    [Unit]
+    Description=Tftp Server
+    Requires=tftp.socket
+    Documentation=man:in.tftpd
+
+    [Service]
+    ExecStart=/usr/sbin/in.tftpd -B 600 -R 9000:9090 -s /srv/tftp -u tftp
+    StandardInput=socket
+
+    [Install]
+    Also=tftp.socket
     ```
 
-6. Start & Enable the xinetd (tftp) service: `systemctl enable --now xinetd`
+    Fun fact! TFTP listens for new connections on port 69, but then transfers the file on some other port. To specify where that port should be (which you should so you can protect your system via a firewall) use -R startport:endport.
+
+    Fun Fact 2: If your network has small mtu sizes, you probably need to set a more appropriate MTU size for your server. tftp-server uses the -B or --blocksize option for this. -B 600
+
+    Fun Fact 3: you do actually have to run this as root with the -u tftp option. idk wy it just is what it is.
+
+6. Start & Enable the tftp service: `systemctl enable --now tftp`
+7. Add the tftp service (and associated ports) to the firwall:
+
+    ```bash
+    firewall-cmd --add-service tftp --permanent
+    firewall-cmd --add-port 9000-9090/udp --permanent
+    firewall-cmd --reload
+    ```
 
 ### Test it with tftp client
 
@@ -137,6 +163,8 @@ PXE starts with TFTP. So we'll set up a directory for tftp to host a bunch of fi
     tftp localhost
     tftp> get pxelinux.0
     ```
+
+3. Note - your client firewall needs to allow tftp (or just temporarily disable your firewall)
 
 ## Kickstart File
 
@@ -180,3 +208,20 @@ ip dhcp pool your-pool-name
    lease 0 2 0 4
 end
 ```
+
+## Memtest
+
+This is entirely optional, but if you want to make memtest available via PXE boot then do this:
+
+1. Download the "Binary Files (.bin/.efi)" from <https://memtest.org> . I was able to grab these from <https://memtest.org/download/v6.20/mt86plus_6.20.binaries.zip> (but this may be out of date).
+2. Extract the binaries: `unzip mt86plus_6.20.binaries.zip`
+3. Copy the desired memtest file over to the TFTP directory: `cp memtest64.bin /srv/tftp`
+4. Add that config to your pxelinux.cfg/default file:
+
+    ```cfg
+    LABEL 6
+      MENU LABEL ^Memtest
+      KERNEL memtest64.bin
+    ```
+
+5. * Note - you want to use the appropriate file. If you configured PXE for UEFI, then use the memtest64.efi files. If you have 32-bit systems in use, use memtest32.bin.
